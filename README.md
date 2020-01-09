@@ -1,6 +1,6 @@
 # Master-s-Project
 
-This is my Master's Project that I completed as a requirement to graduate at SIUE with a Masters Degree in Statistics. The project deals with propensity scores and their applications in determining treatment effect and achieving balance among covariates.
+This is my Master's Project that I completed as a requirement to graduate at SIUE with a Masters Degree in Statistics. The project deals with propensity scores and their applications in determining treatment effect in observational studies and achieving balance among covariates.
 
 The Master's Project Paper is the formal report I submitted that outlines the theory behind the project and real-world implementation.
 
