@@ -1,0 +1,437 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r}
+## helper
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(magrittr)
+library(plyr)
+library(mvtnorm)
+library(Rlab)
+library(plotrix)
+
+## Load Matching for PS matching
+library(Matching)
+## Load FastDummies
+library(fastDummies)
+```
+
+## Prepare data
+
+```{r}
+## Right heart cath dataset
+rhc <- read.csv("http://biostat.mc.vanderbilt.edu/wiki/pub/Main/DataSets/rhc.csv")
+## first 6 rows
+head(rhc)
+str(rhc)
+with(rhc, unique(cat1))
+## Show outcome (death) and exposure (swang1)
+addmargins(table(rhc[,c("swang1", "death")]))
+## Create weights for plotting
+rhc$one <- 1
+```
+
+## Convert Categorical Variable to Dummies
+
+```{r}
+dmmy <- rhc %>% dplyr::select(cat1, cat2, ca, ninsclas, race, income) %>%
+  dummy_cols(remove_first_dummy = TRUE) %>% 
+  dplyr::rename("income_25_50k" = "income_$25-$50k", "income_11_25k" = "income_$11-$25k", "income_50k" = "income_> $50k")   %>%
+  dplyr::select(-cat1, -cat2, -ca, -ninsclas, -race, -income) 
+str(dmmy) 
+colnames(dmmy) <- str_replace_all(names(dmmy), c(" " = "." , "," = ".", "/" = ".", "&" = "_"))
+str(dmmy) 
+```
+
+## Combine RHC with dummy data frame
+
+```{r}
+RHC.D <- cbind(rhc, dmmy)
+str(RHC.D)
+```
+
+## Construct propensity score model
+
+```{r}
+## PS model
+
+psModel <- glm(swang1 ~ age + sex + edu + das2d3pc + dnr1 + surv2md1 + aps1 + scoma1 + wtkilo1 + temp1 + meanbp1 + resp1 + hrt1 + pafi1 + paco21 + ph1 + wblc1 + hema1 + sod1 + pot1 + crea1 + bili1 + alb1 + resp + card + neuro + gastr + renal + meta + hema + seps + trauma + ortho + cardiohx + chfhx + dementhx + psychhx + chrpulhx + renalhx + liverhx + gibledhx + malighx + immunhx + transhx + amihx +
+ cat1_MOSF.w.Sepsis  +  cat1_MOSF.w.Malignancy  +   cat1_ARF  + cat1_CHF +  cat1_Coma +  cat1_Cirrhosis  + cat1_Lung.Cancer +   cat1_Colon.Cancer + cat2_MOSF.w.Sepsis + cat2_Coma + cat2_MOSF.w.Malignancy + cat2_Lung.Cancer + cat2_Cirrhosis + cat2_Colon.Cancer + ca_No + ca_Metastatic  + ninsclas_Private._.Medicare + ninsclas_Private  + ninsclas_Medicaid   + ninsclas_No.insurance + ninsclas_Medicare._.Medicaid + race_black + race_other  + income_25_50k + income_11_25k  + income_50k,
+               family  = binomial(link = "logit"),
+               data    = RHC.D)
+
+length(psModel$coefficients)
+
+
+
+##Create treatment assignment using ints
+RHC.D$assign <- revalue(RHC.D$swang1, c("No RHC" = "0", "RHC" = "1"))
+RHC.D$z <- as.numeric(as.character(RHC.D$assign))
+
+#Making the outcome covariate into an integer
+RHC.D$dth30 <- revalue(RHC.D$dth30, c("No" = "0", "Yes" = "1"))
+RHC.D$dth30 <- as.integer(as.character(RHC.D$dth30))
+                        
+## PS (predicted probability of treatment)
+RHC.D$ps <- predict(psModel, type = "response")
+RHC.D$ATE <- 1
+RHC.D$ATT <- RHC.D$ps
+RHC.D$overlap <- RHC.D$ps*(1- RHC.D$ps)
+str(RHC.D)
+```
+
+
+####Finding the Absolute Standardized Bias of all covariates using all estimation methods
+
+
+#Reordering the data by treatment assignment
+
+```{r}
+z.order <- order(RHC.D$z)
+z.order
+RHC.D$z[z.order]
+
+RHC.D0 <- RHC.D[z.order,]
+
+n0 <- 3551
+n1 <- 2184
+
+```
+
+#Creating dataframe only with covariates
+
+```{r}
+
+RHC.D01 <- RHC.D0[,-c(1:9, 27:28, 45, 48, 59:64)] #column 64 is all ones, maybe include?
+
+#Making all factor covariates ints
+RHC.D01$sex <- revalue(RHC.D01$sex, c("Female" = "0", "Male" = "1"))
+RHC.D01$sex <- as.integer(as.character(RHC.D01$sex))
+
+RHC.D01$dnr1 <- revalue(RHC.D01$dnr1, c("No" = "0", "Yes" = "1"))
+RHC.D01$dnr1 <- as.integer(as.character(RHC.D01$dnr1))
+
+RHC.D01$resp <- revalue(RHC.D01$resp, c("No" = "0", "Yes" = "1"))
+RHC.D01$resp <- as.integer(as.character(RHC.D01$resp))
+
+RHC.D01$card <- revalue(RHC.D01$card, c("No" = "0", "Yes" = "1"))
+RHC.D01$card <- as.integer(as.character(RHC.D01$card))
+
+RHC.D01$neuro <- revalue(RHC.D01$neuro, c("No" = "0", "Yes" = "1"))
+RHC.D01$neuro <- as.integer(as.character(RHC.D01$neuro))
+
+RHC.D01$gastr <- revalue(RHC.D01$gastr, c("No" = "0", "Yes" = "1"))
+RHC.D01$gastr <- as.integer(as.character(RHC.D01$gastr))
+
+RHC.D01$renal <- revalue(RHC.D01$renal, c("No" = "0", "Yes" = "1"))
+RHC.D01$renal <- as.integer(as.character(RHC.D01$renal))
+
+RHC.D01$meta <- revalue(RHC.D01$meta, c("No" = "0", "Yes" = "1"))
+RHC.D01$meta <- as.integer(as.character(RHC.D01$meta))
+
+RHC.D01$hema <- revalue(RHC.D01$hema, c("No" = "0", "Yes" = "1"))
+RHC.D01$hema <- as.integer(as.character(RHC.D01$hema))
+
+RHC.D01$seps <- revalue(RHC.D01$seps, c("No" = "0", "Yes" = "1"))
+RHC.D01$seps <- as.integer(as.character(RHC.D01$seps))
+
+RHC.D01$trauma <- revalue(RHC.D01$trauma, c("No" = "0", "Yes" = "1"))
+RHC.D01$trauma <- as.integer(as.character(RHC.D01$trauma))
+
+RHC.D01$ortho <- revalue(RHC.D01$ortho, c("No" = "0", "Yes" = "1"))
+RHC.D01$ortho <- as.integer(as.character(RHC.D01$ortho))
+
+```
+
+
+#Finding the Absolute Standardized Bias (ASB) of all covariates using no weights
+
+```{r}
+RHC.D01$dem1.nw <- sum(RHC.D01$z)
+RHC.D01$dem0.nw <- sum(1-RHC.D01$z)
+
+N <- 71
+noweights <- numeric(71)
+
+for(i in 1:N){
+  noweights[i] <- abs((sum(RHC.D01[,i]*RHC.D0$z)/RHC.D01$dem1.nw)[1] - (sum(RHC.D01[,i]*(1-RHC.D01$z))/RHC.D01$dem0.nw))[1] / (sqrt((var(RHC.D01[1:3551,i])/n0)+(var(RHC.D01[3552:5735,i])/n1)))
+}
+
+noweights
+boxplot(noweights)
+
+```
+
+#Finding the Absolute Standardized Bias (ASB) of all covariates using ATE weights
+
+```{r}
+RHC.D01$omega1.ate <- 1/RHC.D01$ps
+RHC.D01$omega0.ate <- 1/(1-RHC.D01$ps)
+RHC.D01$dem1.ate <- sum(RHC.D01$z*RHC.D01$omega1.ate)
+RHC.D01$dem0.ate <- sum((1-RHC.D01$z)*RHC.D01$omega0.ate)
+
+N <- 71
+ate <- numeric(71)
+
+for(i in 1:N){
+  ate[i] <- abs((sum(RHC.D01[,i]*RHC.D0$z*RHC.D01$omega1.ate)/RHC.D01$dem1.ate)[1] - (sum(RHC.D01[,i]*(1-RHC.D01$z)*RHC.D01$omega0.ate)/RHC.D01$dem0.ate))[1] / (sqrt((var(RHC.D01[1:3551,i])/n0)+(var(RHC.D01[3552:5735,i])/n1)))
+}
+
+ate
+boxplot(ate)
+```
+
+
+#Finding the Absolute Standardized Bias (ASB) of all covariates using ATT weights
+
+```{r}
+RHC.D01$omega1.att <- 1
+RHC.D01$omega0.att <- RHC.D01$ps/(1-RHC.D01$ps)
+RHC.D01$dem1.att <- sum(RHC.D01$z*RHC.D01$omega1.att)
+RHC.D01$dem0.att <- sum((1-RHC.D01$z)*RHC.D01$omega0.att)
+
+N <- 71
+att <- numeric(71)
+
+for(i in 1:N){
+  att[i] <- abs((sum(RHC.D01[,i]*RHC.D0$z*RHC.D01$omega1.att)/RHC.D01$dem1.att)[1] - (sum(RHC.D01[,i]*(1-RHC.D01$z)*RHC.D01$omega0.att)/RHC.D01$dem0.att))[1] / (sqrt((var(RHC.D01[1:3551,i])/n0)+(var(RHC.D01[3552:5735,i])/n1)))
+}
+
+att
+boxplot(att)
+```
+
+
+#Finding the Absolute Standardized Bias (ASB) of all covariates using overlap weights
+
+```{r}
+RHC.D01$omega1.ol <- (1-RHC.D01$ps)
+RHC.D01$omega0.ol <- RHC.D01$ps
+RHC.D01$dem1.ol <- sum(RHC.D01$z*RHC.D01$omega1.ol)
+RHC.D01$dem0.ol <- sum((1-RHC.D01$z)*RHC.D01$omega0.ol)
+
+N <- 71
+overlap <- numeric(71)
+
+for(i in 1:N){
+  overlap[i] <- abs((sum(RHC.D01[,i]*RHC.D0$z*RHC.D01$omega1.ol)/RHC.D01$dem1.ol)[1] - (sum(RHC.D01[,i]*(1-RHC.D01$z)*RHC.D01$omega0.ol)/RHC.D01$dem0.ol))[1] / (sqrt((var(RHC.D01[1:3551,i])/n0)+(var(RHC.D01[3552:5735,i])/n1)))
+}
+
+overlap
+boxplot(overlap)
+```
+
+#Combining the 4 boxplots into 1 plot
+```{r}
+boxplot(noweights, ate, att, overlap, main="ASB for Covariates using RHC Study", 
+        ylab = "Absolute Standardized Bias", xlab = "Weight Type")
+axis(1, 1:4, c("Unweighted", "ATE", "ATT", "Overlap"))
+```
+
+
+####Finding the WATE of all estimation methods
+
+#Turning the outcome covariate into an integer
+
+```{r}
+RHC.D0$dth30 <- revalue(RHC.D0$dth30, c("No" = "0", "Yes" = "1"))
+RHC.D0$dth30 <- as.integer(as.character(RHC.D0$dth30))
+```
+
+#Truncating extreme propensity score values
+```{r}
+RHC.D.trunc <- RHC.D
+ps.order.trunc <- order(RHC.D.trunc$ps)
+ps.order.trunc
+RHC.D.trunc$ps[ps.order.trunc]
+
+RHC.D0.trunc <- RHC.D.trunc[ps.order.trunc,]
+
+max <- max(which(RHC.D0.trunc$ps < 0.1))
+min <- min(which(RHC.D0.trunc$ps > 0.9))
+
+RHC.D0.trunc <- RHC.D0.trunc[-c(min:5735),]
+RHC.D0.trunc <- RHC.D0.trunc[-c(1:max),]
+```
+
+
+#WATE using no weights
+
+```{r}
+RHC.D0$dem1.nw <- sum(RHC.D0$z)
+RHC.D0$dem0.nw <- sum(1-RHC.D0$z)
+
+((sum(RHC.D0$dth30*RHC.D0$z)/RHC.D0$dem1.nw)[1] - (sum(RHC.D0$dth30*(1-RHC.D0$z))/RHC.D0$dem0.nw)[1])
+```
+
+#WATE using ATE weights
+
+```{r}
+RHC.D0$omega1.ate <- 1/RHC.D0$ps
+RHC.D0$omega0.ate <- 1/(1-RHC.D0$ps)
+RHC.D0$dem1.ate <- sum(RHC.D0$z*RHC.D0$omega1.ate)
+RHC.D0$dem0.ate <- sum((1-RHC.D0$z)*RHC.D0$omega0.ate)
+
+(sum(RHC.D0$dth30*RHC.D0$z*RHC.D0$omega1.ate)/RHC.D0$dem1.ate)[1] - (sum(RHC.D0$dth30*(1-RHC.D0$z)*(RHC.D0$omega0.ate)/RHC.D0$dem0.ate)[1])
+```
+
+#WATE using ATT weights
+
+```{r}
+RHC.D0$omega1.att <- 1
+RHC.D0$omega0.att <- RHC.D0$ps/(1-RHC.D0$ps)
+RHC.D0$dem1.att <- sum(RHC.D0$z*RHC.D0$omega1.att)
+RHC.D0$dem0.att <- sum((1-RHC.D0$z)*RHC.D0$omega0.att)
+
+(sum(RHC.D0$dth30*RHC.D0$z*RHC.D0$omega1.att)/RHC.D0$dem1.att)[1] - (sum(RHC.D0$dth30*(1-RHC.D0$z)*(RHC.D0$omega0.att)/RHC.D0$dem0.att)[1])
+```
+
+#WATE using overlap weights
+
+```{r}
+RHC.D0$omega1.overlap <- 1-RHC.D0$ps
+RHC.D0$omega0.overlap <- RHC.D0$ps
+RHC.D0$dem1.overlap <- sum(RHC.D0$z*RHC.D0$omega1.overlap)
+RHC.D0$dem0.overlap <- sum((1-RHC.D0$z)*RHC.D0$omega0.overlap)
+
+(sum(RHC.D0$dth30*RHC.D0$z*RHC.D0$omega1.overlap)/RHC.D0$dem1.overlap)[1] - (sum(RHC.D0$dth30*(1-RHC.D0$z)*(RHC.D0$omega0.overlap)/RHC.D0$dem0.overlap)[1])
+```
+
+#WATE using ATT weights and truncated propensity scores between 0.1 and 0.9
+
+```{r}
+RHC.D0.trunc$omega1.att <- 1
+RHC.D0.trunc$omega0.att <- RHC.D0.trunc$ps/(1-RHC.D0.trunc$ps)
+RHC.D0.trunc$dem1.att <- sum(RHC.D0.trunc$z*RHC.D0.trunc$omega1.att)
+RHC.D0.trunc$dem0.att <- sum((1-RHC.D0.trunc$z)*RHC.D0.trunc$omega0.att)
+
+(sum(RHC.D0.trunc$dth30*RHC.D0.trunc$z*RHC.D0.trunc$omega1.att)/RHC.D0.trunc$dem1.att)[1] - (sum(RHC.D0.trunc$dth30*(1-RHC.D0.trunc$z)*(RHC.D0.trunc$omega0.att)/RHC.D0.trunc$dem0.att)[1])
+```
+
+
+####Finding Standard Errors of all estimation methods
+
+#Defining omegas and denominators for all effect measurements
+
+```{r}
+dem.omega <- function(data){
+  #No Weights
+  data$dem1.nw <- sum(data$z)
+  data$dem0.nw <- sum(1-data$z)
+
+  #ATE
+  data$omega1.ate <- 1/data$ps
+  data$omega0.ate <- 1/(1-data$ps)
+  data$dem1.ate <- sum(data$z*data$omega1.ate)
+  data$dem0.ate <- sum((1-data$z)*data$omega0.ate)
+  
+  #ATT
+  data$omega1.att <- 1
+  data$omega0.att <- data$ps/(1-data$ps)
+  data$dem1.att <- sum(data$z*data$omega1.att)
+  data$dem0.att <- sum((1-data$z)*data$omega0.att)
+  
+  #Overlap
+  data$omega1.overlap <- 1-data$ps
+  data$omega0.overlap <- data$ps
+  data$dem1.overlap <- sum(data$z*data$omega1.overlap)
+  data$dem0.overlap <- sum((1-data$z)*data$omega0.overlap)
+  
+  return(data)
+}
+```
+
+#Truncating Function
+```{r}
+trunc <- function(data){  
+  RHC.D.trunc <- data
+  ps.order.trunc <- order(RHC.D.trunc$ps)
+  
+  RHC.D0.trunc <- RHC.D.trunc[ps.order.trunc,]
+  
+  max <- max(which(RHC.D0.trunc$ps < 0.1))
+  min <- min(which(RHC.D0.trunc$ps > 0.9))
+  
+  RHC.D0.trunc <- RHC.D0.trunc[-c(min:5735),]
+  RHC.D0.trunc <- RHC.D0.trunc[-c(1:max),]
+  
+  RHC.D0.trunc$omega1.att <- 1
+  RHC.D0.trunc$omega0.att <- RHC.D0.trunc$ps/(1-RHC.D0.trunc$ps)
+  RHC.D0.trunc$dem1.att <- sum(RHC.D0.trunc$z*RHC.D0.trunc$omega1.att)
+  RHC.D0.trunc$dem0.att <- sum((1-RHC.D0.trunc$z)*RHC.D0.trunc$omega0.att)
+  
+  return(RHC.D0.trunc)
+}
+```
+
+#WATE function for all effect types
+
+```{r}
+wate <- function(data){
+  #No Weights
+  a <- ((sum(data$dth30*data$z)/data$dem1.nw)[1] - (sum(data$dth30*(1-data$z))/data$dem0.nw)[1])
+
+  #ATE
+  b <- (sum(data$dth30*data$z*data$omega1.ate)/data$dem1.ate)[1] - (sum(data$dth30*(1-data$z)*(data$omega0.ate)/data$dem0.ate)[1])
+  
+  #ATT
+  c <- (sum(data$dth30*data$z*data$omega1.att)/data$dem1.att)[1] - (sum(data$dth30*(1-data$z)*(data$omega0.att)/data$dem0.att)[1])
+  
+  #Overlap
+  d <- (sum(data$dth30*data$z*data$omega1.overlap)/data$dem1.overlap)[1] - (sum(data$dth30*(1-data$z)*(data$omega0.overlap))/data$dem0.overlap)[1]
+  
+  #Truncated ATT
+  trunc.data <- trunc(data)
+  e <- (sum(trunc.data$dth30*trunc.data$z*trunc.data$omega1.att)/trunc.data$dem1.att)[1] - (sum(trunc.data$dth30*(1-trunc.data$z)*(trunc.data$omega0.att)/trunc.data$dem0.att)[1])
+    
+  return(c(a,b,c,d,e))
+}
+```
+
+
+
+#Bootstrapping function
+
+```{r}
+model.boot <- function(n){
+  i <- sample(1:n, size=n, replace=TRUE)
+  RHC.D.boot <- RHC.D[i,]
+  psmod.boot <- glm(swang1 ~ age + sex + edu + das2d3pc + dnr1 + surv2md1 + aps1 + scoma1 + wtkilo1 + temp1 + meanbp1 + resp1 + hrt1 + pafi1 + paco21 + ph1 + wblc1 + hema1 + sod1 + pot1 + crea1 + bili1 + alb1 + resp + card +    neuro + gastr + renal + meta + hema + seps + trauma + ortho + cardiohx + chfhx + dementhx + psychhx + chrpulhx + renalhx + liverhx + gibledhx + malighx + immunhx + transhx + amihx +
+  cat1_MOSF.w.Sepsis  +  cat1_MOSF.w.Malignancy  +   cat1_ARF  + cat1_CHF +  cat1_Coma +  cat1_Cirrhosis  + cat1_Lung.Cancer +   cat1_Colon.Cancer + cat2_MOSF.w.Sepsis + cat2_Coma + cat2_MOSF.w.Malignancy + cat2_Lung.Cancer +   cat2_Cirrhosis + cat2_Colon.Cancer + ca_No + ca_Metastatic  + ninsclas_Private._.Medicare + ninsclas_Private  + ninsclas_Medicaid   + ninsclas_No.insurance + ninsclas_Medicare._.Medicaid + race_black + race_other  +         income_25_50k + income_11_25k  + income_50k,
+               family  = binomial(link = "logit"),
+               data    = RHC.D.boot)
+  RHC.D.boot$ps <- predict(psmod.boot, type = "response")
+  RHC.wate <- dem.omega(RHC.D.boot)
+  WATE <- wate(RHC.wate)
+  return(WATE)
+}
+
+#Function Test
+model.boot(5735)
+
+#Running the function
+n <- 5735
+B <- 100
+
+set.seed(1234)
+wate.star <- replicate(B, expr = model.boot(n), simplify = TRUE)
+(se.wate.nw.star <- sd(wate.star[1,]))
+(se.wate.ate.star <- sd(wate.star[2,]))
+(se.wate.att.star <- sd(wate.star[3,]))
+(se.wate.overlap.star <- sd(wate.star[4,]))
+(se.wate.truncatt.star <- sd(wate.star[5,]))
+```
+
+
+

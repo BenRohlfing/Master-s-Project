@@ -1,0 +1,749 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r}
+## helper
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(magrittr)
+library(plyr)
+library(mvtnorm)
+library(Rlab)
+library(plotrix)
+
+## Load Matching for PS matching
+library(Matching)
+## Load FastDummies
+library(fastDummies)
+```
+
+## Simulation from Li, Thomas, and Li
+
+## Developing the simulation model
+
+```{r}
+#Generating the multivariate random varible
+gen <- function(n){
+  mean <- c(0,0,0,0,0,0)
+  sigma <- matrix(c(1,0.5,0.5,0.5,0.5,0.5,
+                  0.5,1,0.5,0.5,0.5,0.5,
+                  0.5,0.5,1,0.5,0.5,0.5,
+                  0.5,0.5,0.5,1,0.5,0.5,
+                  0.5,0.5,0.5,0.5,1,0.5,
+                  0.5,0.5,0.5,0.5,0.5,1),
+                ncol = 6)
+  v <- rmvnorm(n, mean=mean, sigma=sigma)
+  #Keeping first three covariates the same, making last three covariates binary
+  x1 <- v[,1]
+  x2 <- v[,2]
+  x3 <- v[,3]
+  x4 <- as.numeric(v[,4] < 0)
+  x5 <- as.numeric(v[,5] < 0)
+  x6 <- as.numeric(v[,6] < 0)
+  x <- data.frame(x1, x2, x3, x4, x5, x6)
+  return(x)
+}
+
+ps.model <- function(data, gamma, treat.prev, n){
+  e <- numeric(n) 
+  for(i in 1:n){
+    e[i] <- (1 + exp(-(treat.prev + .15*gamma*data[i,1] + 0.3*gamma*data[i,2] + 0.3*gamma*data[i,3]
+                        - 0.2*gamma*data[i,4] - 0.25*gamma*data[i,5] - 0.25*gamma*data[i,6])))^-1
+  }
+  return(e)
+}
+
+#Simulating observed treatment values
+treat.assign <- function(ps, n){
+  z <- numeric(n)
+  for(i in 1:n){
+    z[i] <- rbern(1, ps[i])
+  }
+  return(z)
+}
+
+#Outcome model
+
+outcomeModel <- function(data, z, n){
+  y <- numeric(n)
+  for(i in 1:n){
+    y[i] <- (-0.5*data[i,1] - 0.5*data[i,2] - 1.5*data[i,3] 
+    + 0.8*data[i,4] + 0.8*data[i,5] + 1.0*data[i,6]
+    + 0.75*z[i] + rnorm(1, mean=0, sd=1.5)) 
+  }
+  return(y)
+}
+
+data <- function(gamma, treat.prev, n){
+  x <- gen(n)
+  ps <- ps.model(x,gamma,treat.prev, n)
+  z <- treat.assign(ps,n)
+  y <- outcomeModel(x,z,n)
+  x <- data.frame(x, ps, z, y)
+  return(x)
+}
+
+x <- data(2,0.4,500)
+```
+
+##Crude Estimate
+```{r}
+crude <- function(gamma, treat.prev, n){
+  x <- data(gamma,treat.prev,n)
+  crude <- (sum(x[,8]*x[,9])/sum(x[,8])) - (sum((1-x[,8])*x[,9])/sum((1-x[,8])))
+  return(crude)
+}
+```
+
+## Overlap Weighting
+```{r}
+omega.ol <- function(data, n){
+  w.ol <- numeric(n)
+  for(i in 1:n){
+    if(data[i,8] == 1){
+      w.ol[i] <- 1-data[i,7]
+    }
+    else if(data[i,8] == 0){
+      w.ol[i] <- data[i,7]
+    }
+  }
+  return(w.ol)
+}
+
+overlap <- function(gamma, treat.prev, n){
+  x <- data(gamma,treat.prev,n)
+  omega_ol <- omega.ol(x,n)
+  x <- data.frame(x,omega_ol)
+  (overlap <- (sum(x[,8]*x[,9]*x[,10])/sum(x[,8]*x[,10])) - 
+  sum((1-x[,8])*x[,9]*x[,10])/sum((1-x[,8])*x[,10]))
+  return(overlap)
+}
+
+(overlap.bias <- overlap(1,0.4,500))
+```
+
+##Inverse Probability Weighting
+```{r}
+#Calculating Weights
+omega.ipw <- function(data, n){
+  w.ipw <- numeric(n)
+  for(i in 1:n){
+    if(data[i,8] == 1){
+      w.ipw[i] <- 1/data[i,7]
+    }
+    else if(data[i,8] == 0){
+      w.ipw[i] <- 1/(1-data[i,7])
+    }
+  }
+  return(w.ipw)
+}
+
+#Calculating treatment effects using IPW and finding its bias 
+ipw <- function(gamma, treat.prev, n){
+  x <- data(gamma,treat.prev,n)
+  omega_ipw <- omega.ipw(x,n)
+  x <- data.frame(x,omega_ipw)
+  ipw <- (sum(x[,8]*x[,9]*x[,10])/sum(x[,8]*x[,10])) - 
+  (sum((1-x[,8])*x[,9]*x[,10])/sum((1-x[,8])*x[,10]))
+  return(ipw)
+}
+
+(bias.ipw <- ipw(2,0.4,500))
+```
+
+
+##Symmetric Trimmed IPW
+```{r}
+#Truncating PS Values
+sym.trim <- function(data, alpha,n){
+  ps.order <- order(data[,7])
+  data.trunc <- data[ps.order,]
+
+  max <- max(which(data.trunc[,7] < alpha))
+  min <- min(which(data.trunc[,7] > (1-alpha)))
+
+  if(max == -Inf | min == Inf){
+    data.trunc <- data.trunc
+  }else if (max | min != "NA"){
+    data.trunc <- data.trunc[-c(min:n),]
+    data.trunc <- data.trunc[-c(1:max),]
+  }
+  return(data.trunc)
+}
+
+#Calculating symmetric trimmed IPW weights
+omega.ipw.trim <- function(data, n){
+  w.ipw.trim <- numeric(n)
+  for(i in 1:n){
+    if(data[i,8] == 1){
+      w.ipw.trim[i] <- 1/data[i,7]
+    }
+    else if(data[i,8] == 0){
+      w.ipw.trim[i] <- 1/(1-data[i,7])
+    }
+  }
+  return(w.ipw.trim)
+}
+
+ipw.trim <- function(gamma, treat.prev, alpha, n){
+  x <- data(gamma,treat.prev,n)
+  x.trunc <- sym.trim(x,alpha,n)
+  n2 <- length(x.trunc[,1])
+  omega_ipw_trim <- omega.ipw.trim(x.trunc,n2)
+  x.trunc <- data.frame(x.trunc,omega_ipw_trim)
+  (ipw.trim <- (sum(x.trunc[,8]*x.trunc[,9]*x.trunc[,10])/sum(x.trunc[,8]*x.trunc[,10])) -
+  (sum((1-x.trunc[,8])*x.trunc[,9]*x.trunc[,10])/sum((1-x.trunc[,8])*x.trunc[,10])))
+  return(ipw.trim)
+}
+
+(x.trunc <- ipw.trim(1,0.4,0.15,500))
+```
+
+##Asymmetric Trimmed IPW
+
+```{r}
+asym.trim <- function(data,q,n){
+  #Step 1 - Trimming non-overlap points
+  ps.order.atrunc <- order(data[,7])
+  data.atrunc <- data[ps.order.atrunc,]
+  tail(data.atrunc)
+  
+  (control.max <- max(which(data.atrunc[,8] == 0)))
+  (treat.min <- min(which(data.atrunc[,8] == 1)))
+  
+  if(control.max != n){
+    data.atrunc <- data.atrunc[-c((control.max+1):n),]
+  } else if (control.max == n){
+    data.atrunc <- data.atrunc
+  }
+
+  if(treat.min != 1){
+    data.atrunc <- data.atrunc[-c(1:(treat.min-1)),]
+  } else if(treat.min == 1){
+    data.atrunc <- data.atrunc
+  }
+  
+  #Step 2 - Trim based on given quantiles if q > 0
+  if(q > 0){
+    z.order.atrunc <- order(data.atrunc[,8])
+    data.atrunc <- data.atrunc[z.order.atrunc,]
+    
+    (z0.max <- max(which(data.atrunc[,8] == 0)))
+    (z1.min <- min(which(data.atrunc[,8] == 1)))
+    
+    (z0.quant.value <- quantile(data.atrunc[1:z0.max,7], (1-q))) 
+    (z1.quant.value <- quantile(data.atrunc[z1.min:dim(data.atrunc)[1],7], q))
+    
+    (z0.trim <- which(data.atrunc[,8] == 0 & data.atrunc[,7] > z0.quant.value))
+    (z1.trim <- which(data.atrunc[,8] == 1 & data.atrunc[,7] < z1.quant.value))
+    
+    data.atrunc <- data.atrunc[-c(z0.trim, z1.trim),]
+  } else data.atrunc <- data.atrunc
+}
+
+##Asymmetric Trimmed IPw Weights
+
+omega.ipw.atrim <- function(data, n){
+  w.ipw.atrim <- numeric(n)
+  for(i in 1:n){
+    if(data[i,8] == 1){
+      w.ipw.atrim[i] <- 1/data[i,7]
+    }
+    else if(data[i,8] == 0){
+      w.ipw.atrim[i] <- 1/(1-data[i,7])
+    }
+  }
+  return(w.ipw.atrim)
+}
+
+#Calculating ATE with IPW and its bias
+ipw.atrim <- function(gamma, treat.prev, q, n){
+  x <- data(gamma,treat.prev,n)
+  x.atrunc <- asym.trim(x,q,n)
+  n2 <- length(x.atrunc[,1])
+  omega_ipw_atrim <- omega.ipw.atrim(x.atrunc,n2)
+  x.atrunc <- data.frame(x.atrunc,omega_ipw_atrim)
+  (ipw.atrim <- (sum(x.atrunc[,8]*x.atrunc[,9]*x.atrunc[,10])/sum(x.atrunc[,8]*x.atrunc[,10])) - 
+  (sum((1-x.atrunc[,8])*x.atrunc[,9]*x.atrunc[,10])/sum((1-x.atrunc[,8])*x.atrunc[,10])))
+  return(ipw.atrim)
+}
+
+(x.atrunc.bias <- ipw.atrim(1,0.4,0.05,500))
+```
+
+##Bias function containing all possible methods
+
+###NOTE: Set the seed before each individual simulation
+
+```{r}
+set.seed(1234)
+bias <- function(gamma, treat.prev, crude, overlap, ipw, sym.trim, alpha, asym.trim, q, n){
+  if(crude == T && overlap == F && ipw == F && sym.trim == F && asym.trim == F){
+    crude.rep <- replicate(1000, expr = crude(gamma,treat.prev,n))
+    return(mean(crude.rep)-0.75)
+  } else if(crude == F && overlap == T && ipw == F && sym.trim == F && asym.trim == F){
+    overlap.rep <- replicate(1000, expr = overlap(gamma,treat.prev,n))
+    return(mean(overlap.rep)-0.75)
+  } else if(crude == F && overlap == F && ipw == T && sym.trim == F && asym.trim == F){
+    ipw.rep <- replicate(1000, expr = ipw(gamma,treat.prev,n))
+    return(mean(ipw.rep)-0.75)
+  } else if(crude == F && overlap == F && ipw == F && sym.trim == T && asym.trim == F){
+    ipw.trim.rep <- replicate(1000, expr = ipw.trim(gamma,treat.prev,alpha,n))
+    return(mean(ipw.trim.rep)-0.75)
+  } else if(crude == F && overlap == F && ipw == F && sym.trim == F && asym.trim == T){
+    ipw.atrim.rep <- replicate(1000, expr = ipw.atrim(gamma,treat.prev,q,n))
+    return(mean(ipw.atrim.rep)-0.75)
+  }
+}
+
+##n = 500
+ #Treatment Prevalence = 0.4
+
+  #Crude Estimator
+set.seed(1234)
+(Bias.crude.g1.tp4 <- bias(1,0.4,T,F,F,F,0,F,0,500))
+(Bias.crude.g2.tp4 <- bias(2,0.4,T,F,F,F,0,F,0,500))
+(Bias.crude.g3.tp4 <- bias(3,0.4,T,F,F,F,0,F,0,500))
+(Bias.crude.g4.tp4 <- bias(4,0.4,T,F,F,F,0,F,0,500))
+
+  #Overlap Estimator
+set.seed(1234)
+(Bias.ov.g1.tp4 <- bias(1,0.4,F,T,F,F,0,F,0,500))
+(Bias.ov.g2.tp4 <- bias(2,0.4,F,T,F,F,0,F,0,500))
+(Bias.ov.g3.tp4 <- bias(3,0.4,F,T,F,F,0,F,0,500))
+(Bias.ov.g4.tp4 <- bias(4,0.4,F,T,F,F,0,F,0,500))
+
+  #IPW With no Trim
+set.seed(1234)
+(Bias.ipw.g1.tp4 <- bias(1,0.4,F,F,T,F,0,F,0,500))
+(Bias.ipw.g2.tp4 <- bias(2,0.4,F,F,T,F,0,F,0,500))
+(Bias.ipw.g3.tp4 <- bias(3,0.4,F,F,T,F,0,F,0,500))
+(Bias.ipw.g4.tp4 <- bias(4,0.4,F,F,T,F,0,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.05
+set.seed(1234)
+(Bias.symtrim.a5.g1.tp4 <- bias(1,0.4,F,F,F,T,0.05,F,0,500))
+(Bias.symtrim.a5.g2.tp4 <- bias(2,0.4,F,F,F,T,0.05,F,0,500))
+(Bias.symtrim.a5.g3.tp4 <- bias(3,0.4,F,F,F,T,0.05,F,0,500))
+(Bias.symtrim.a5.g4.tp4 <- bias(4,0.4,F,F,F,T,0.05,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.10
+set.seed(1234)
+(Bias.symtrim.a10.g1.tp4 <- bias(1,0.4,F,F,F,T,0.10,F,0,500))
+(Bias.symtrim.a10.g2.tp4 <- bias(2,0.4,F,F,F,T,0.10,F,0,500))
+(Bias.symtrim.a10.g3.tp4 <- bias(3,0.4,F,F,F,T,0.10,F,0,500))
+(Bias.symtrim.a10.g4.tp4 <- bias(4,0.4,F,F,F,T,0.10,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.15
+set.seed(1234)
+(Bias.symtrim.a15.g1.tp4 <- bias(1,0.4,F,F,F,T,0.15,F,0,500))
+(Bias.symtrim.a15.g2.tp4 <- bias(2,0.4,F,F,F,T,0.15,F,0,500))
+(Bias.symtrim.a15.g3.tp4 <- bias(3,0.4,F,F,F,T,0.15,F,0,500))
+(Bias.symtrim.a15.g4.tp4 <- bias(4,0.4,F,F,F,T,0.15,F,0,500))
+
+#IPW With Asymmetric Trim and q = 0
+set.seed(1234)
+(Bias.asymtrim.q0.g1.tp4 <- bias(1,0.4,F,F,F,F,0,T,0,500))
+(Bias.asymtrim.q0.g2.tp4 <- bias(2,0.4,F,F,F,F,0,T,0,500))
+(Bias.asymtrim.q0.g3.tp4 <- bias(3,0.4,F,F,F,F,0,T,0,500))
+(Bias.asymtrim.q0.g4.tp4 <- bias(4,0.4,F,F,F,F,0,T,0,500))
+
+#IPW With Asymmetric Trim and q = 0.01
+set.seed(1234)
+(Bias.asymtrim.q1.g1.tp4 <- bias(1,0.4,F,F,F,F,0,T,0.01,500))
+(Bias.asymtrim.q1.g2.tp4 <- bias(2,0.4,F,F,F,F,0,T,0.01,500))
+(Bias.asymtrim.q1.g3.tp4 <- bias(3,0.4,F,F,F,F,0,T,0.01,500))
+(Bias.asymtrim.q1.g4.tp4 <- bias(4,0.4,F,F,F,F,0,T,0.01,500))
+
+#IPW With Asymmetric Trim and q = 0.05
+set.seed(1234)
+(Bias.asymtrim.q5.g1.tp4 <- bias(1,0.4,F,F,F,F,0,T,0.05,500))
+(Bias.asymtrim.q5.g2.tp4 <- bias(2,0.4,F,F,F,F,0,T,0.05,500))
+(Bias.asymtrim.q5.g3.tp4 <- bias(3,0.4,F,F,F,F,0,T,0.05,500))
+(Bias.asymtrim.q5.g4.tp4 <- bias(4,0.4,F,F,F,F,0,T,0.05,500))
+
+##n = 500
+ #Treatment Prevalence = 0.1
+
+  #Crude Estimator
+set.seed(1234)
+(Bias.crude.g1.tp1 <- bias(1,0.1,T,F,F,F,0,F,0,500))
+(Bias.crude.g2.tp1 <- bias(2,0.1,T,F,F,F,0,F,0,500))
+(Bias.crude.g3.tp1 <- bias(3,0.1,T,F,F,F,0,F,0,500))
+(Bias.crude.g4.tp1 <- bias(4,0.1,T,F,F,F,0,F,0,500))
+
+  #Overlap Estimator
+set.seed(1234)
+(Bias.ov.g1.tp1 <- bias(1,0.1,F,T,F,F,0,F,0,500))
+(Bias.ov.g2.tp1 <- bias(2,0.1,F,T,F,F,0,F,0,500))
+(Bias.ov.g3.tp1 <- bias(3,0.1,F,T,F,F,0,F,0,500))
+(Bias.ov.g4.tp1 <- bias(4,0.1,F,T,F,F,0,F,0,500))
+
+  #IPW With no Trim
+set.seed(1234)
+(Bias.ipw.g1.tp1 <- bias(1,0.1,F,F,T,F,0,F,0,500))
+(Bias.ipw.g2.tp1 <- bias(2,0.1,F,F,T,F,0,F,0,500))
+(Bias.ipw.g3.tp1 <- bias(3,0.1,F,F,T,F,0,F,0,500))
+(Bias.ipw.g4.tp1 <- bias(4,0.1,F,F,T,F,0,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.05
+set.seed(1234)
+(Bias.symtrim.a5.g1.tp1 <- bias(1,0.1,F,F,F,T,0.05,F,0,500))
+(Bias.symtrim.a5.g2.tp1 <- bias(2,0.1,F,F,F,T,0.05,F,0,500))
+(Bias.symtrim.a5.g3.tp1 <- bias(3,0.1,F,F,F,T,0.05,F,0,500))
+(Bias.symtrim.a5.g4.tp1 <- bias(4,0.1,F,F,F,T,0.05,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.10
+set.seed(1234)
+(Bias.symtrim.a10.g1.tp1 <- bias(1,0.1,F,F,F,T,0.10,F,0,500))
+(Bias.symtrim.a10.g2.tp1 <- bias(2,0.1,F,F,F,T,0.10,F,0,500))
+(Bias.symtrim.a10.g3.tp1 <- bias(3,0.1,F,F,F,T,0.10,F,0,500))
+(Bias.symtrim.a10.g4.tp1 <- bias(4,0.1,F,F,F,T,0.10,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.15
+set.seed(1234)
+(Bias.symtrim.a15.g1.tp1 <- bias(1,0.1,F,F,F,T,0.15,F,0,500))
+(Bias.symtrim.a15.g2.tp1 <- bias(2,0.1,F,F,F,T,0.15,F,0,500))
+(Bias.symtrim.a15.g3.tp1 <- bias(3,0.1,F,F,F,T,0.15,F,0,500))
+(Bias.symtrim.a15.g4.tp1 <- bias(4,0.1,F,F,F,T,0.15,F,0,500))
+
+#IPW With Asymmetric Trim and q = 0
+set.seed(1234)
+(Bias.asymtrim.q0.g1.tp1 <- bias(1,0.1,F,F,F,F,0,T,0,500))
+(Bias.asymtrim.q0.g2.tp1 <- bias(2,0.1,F,F,F,F,0,T,0,500))
+(Bias.asymtrim.q0.g3.tp1 <- bias(3,0.1,F,F,F,F,0,T,0,500))
+(Bias.asymtrim.q0.g4.tp1 <- bias(4,0.1,F,F,F,F,0,T,0,500))
+
+#IPW With Asymmetric Trim and q = 0.01
+set.seed(1234)
+(Bias.asymtrim.q1.g1.tp1 <- bias(1,0.1,F,F,F,F,0,T,0.01,500))
+(Bias.asymtrim.q1.g2.tp1 <- bias(2,0.1,F,F,F,F,0,T,0.01,500))
+(Bias.asymtrim.q1.g3.tp1 <- bias(3,0.1,F,F,F,F,0,T,0.01,500))
+(Bias.asymtrim.q1.g4.tp1 <- bias(4,0.1,F,F,F,F,0,T,0.01,500))
+
+#IPW With Asymmetric Trim and q = 0.05
+set.seed(1234)
+(Bias.asymtrim.q5.g1.tp1 <- bias(1,0.1,F,F,F,F,0,T,0.05,500))
+(Bias.asymtrim.q5.g2.tp1 <- bias(2,0.1,F,F,F,F,0,T,0.05,500))
+(Bias.asymtrim.q5.g3.tp1 <- bias(3,0.1,F,F,F,F,0,T,0.05,500))
+(Bias.asymtrim.q5.g4.tp1 <- bias(4,0.1,F,F,F,F,0,T,0.05,500))
+```
+
+#Function for computing RMSE of all methods
+
+###NOTE: Set the seed before each individual simulation
+
+```{r}
+set.seed(1234)
+rmse <- function(gamma, treat.prev, crude, overlap, ipw, sym.trim, alpha, asym.trim, q, n){
+  if(crude == T && overlap == F && ipw == F && sym.trim == F && asym.trim == F){
+    crude.rep <- replicate(1000, expr = crude(gamma,treat.prev,n))
+    return(sqrt(var(crude.rep) + (mean(crude.rep)-0.75)^2))
+  } else if(crude == F && overlap == T && ipw == F && sym.trim == F && asym.trim == F){
+    overlap.rep <- replicate(1000, expr = overlap(gamma,treat.prev,n))
+    return(sqrt(var(overlap.rep) + (mean(overlap.rep)-0.75)^2))
+  } else if(crude == F && overlap == F && ipw == T && sym.trim == F && asym.trim == F){
+    ipw.rep <- replicate(1000, expr = ipw(gamma,treat.prev,n))
+    return(sqrt(var(ipw.rep) + (mean(ipw.rep)-0.75)^2))
+  } else if(crude == F && overlap == F && ipw == F && sym.trim == T && asym.trim == F){
+    ipw.trim.rep <- replicate(1000, expr = ipw.trim(gamma,treat.prev,alpha,n))
+    return(sqrt(var(ipw.trim.rep) + (mean(ipw.trim.rep)-0.75)^2))
+  } else if(crude == F && overlap == F && ipw == F && sym.trim == F && asym.trim == T){
+    ipw.atrim.rep <- replicate(1000, expr = ipw.atrim(gamma,treat.prev,q,n))
+    return(sqrt(var(ipw.atrim.rep) + (mean(ipw.atrim.rep)-0.75)^2))
+  }
+}
+
+##n = 500
+ #Treatment Prevalence = 0.4
+
+  #Crude Estimator
+set.seed(1234)
+(rmse.crude.g1.tp4 <- rmse(1,0.4,T,F,F,F,0,F,0,500))
+(rmse.crude.g2.tp4 <- rmse(2,0.4,T,F,F,F,0,F,0,500))
+(rmse.crude.g3.tp4 <- rmse(3,0.4,T,F,F,F,0,F,0,500))
+(rmse.crude.g4.tp4 <- rmse(4,0.4,T,F,F,F,0,F,0,500))
+
+  #Overlap Estimator
+set.seed(1234)
+(rmse.ov.g1.tp4 <- rmse(1,0.4,F,T,F,F,0,F,0,500))
+(rmse.ov.g2.tp4 <- rmse(2,0.4,F,T,F,F,0,F,0,500))
+(rmse.ov.g3.tp4 <- rmse(3,0.4,F,T,F,F,0,F,0,500))
+(rmse.ov.g4.tp4 <- rmse(4,0.4,F,T,F,F,0,F,0,500))
+
+  #IPW With no Trim
+set.seed(1234)
+(rmse.ipw.g1.tp4 <- rmse(1,0.4,F,F,T,F,0,F,0,500))
+(rmse.ipw.g2.tp4 <- rmse(2,0.4,F,F,T,F,0,F,0,500))
+(rmse.ipw.g3.tp4 <- rmse(3,0.4,F,F,T,F,0,F,0,500))
+(rmse.ipw.g4.tp4 <- rmse(4,0.4,F,F,T,F,0,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.05
+set.seed(1234)
+(rmse.symtrim.a5.g1.tp4 <- rmse(1,0.4,F,F,F,T,0.05,F,0,500))
+(rmse.symtrim.a5.g2.tp4 <- rmse(2,0.4,F,F,F,T,0.05,F,0,500))
+(rmse.symtrim.a5.g3.tp4 <- rmse(3,0.4,F,F,F,T,0.05,F,0,500))
+(rmse.symtrim.a5.g4.tp4 <- rmse(4,0.4,F,F,F,T,0.05,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.10
+set.seed(1234)
+(rmse.symtrim.a10.g1.tp4 <- rmse(1,0.4,F,F,F,T,0.10,F,0,500))
+(rmse.symtrim.a10.g2.tp4 <- rmse(2,0.4,F,F,F,T,0.10,F,0,500))
+(rmse.symtrim.a10.g3.tp4 <- rmse(3,0.4,F,F,F,T,0.10,F,0,500))
+(rmse.symtrim.a10.g4.tp4 <- rmse(4,0.4,F,F,F,T,0.10,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.15
+set.seed(1234)
+(rmse.symtrim.a15.g1.tp4 <- rmse(1,0.4,F,F,F,T,0.15,F,0,500))
+(rmse.symtrim.a15.g2.tp4 <- rmse(2,0.4,F,F,F,T,0.15,F,0,500))
+(rmse.symtrim.a15.g3.tp4 <- rmse(3,0.4,F,F,F,T,0.15,F,0,500))
+(rmse.symtrim.a15.g4.tp4 <- rmse(4,0.4,F,F,F,T,0.15,F,0,500))
+
+#IPW With Asymmetric Trim and q = 0
+set.seed(1234)
+(rmse.asymtrim.q0.g1.tp4 <- rmse(1,0.4,F,F,F,F,0,T,0,500))
+(rmse.asymtrim.q0.g2.tp4 <- rmse(2,0.4,F,F,F,F,0,T,0,500))
+(rmse.asymtrim.q0.g3.tp4 <- rmse(3,0.4,F,F,F,F,0,T,0,500))
+(rmse.asymtrim.q0.g4.tp4 <- rmse(4,0.4,F,F,F,F,0,T,0,500))
+
+#IPW With Asymmetric Trim and q = 0.01
+set.seed(1234)
+(rmse.asymtrim.q1.g1.tp4 <- rmse(1,0.4,F,F,F,F,0,T,0.01,500))
+(rmse.asymtrim.q1.g2.tp4 <- rmse(2,0.4,F,F,F,F,0,T,0.01,500))
+(rmse.asymtrim.q1.g3.tp4 <- rmse(3,0.4,F,F,F,F,0,T,0.01,500))
+(rmse.asymtrim.q1.g4.tp4 <- rmse(4,0.4,F,F,F,F,0,T,0.01,500))
+
+#IPW With Asymmetric Trim and q = 0.05
+set.seed(1234)
+(rmse.asymtrim.q5.g1.tp4 <- rmse(1,0.4,F,F,F,F,0,T,0.05,500))
+(rmse.asymtrim.q5.g2.tp4 <- rmse(2,0.4,F,F,F,F,0,T,0.05,500))
+(rmse.asymtrim.q5.g3.tp4 <- rmse(3,0.4,F,F,F,F,0,T,0.05,500))
+(rmse.asymtrim.q5.g4.tp4 <- rmse(4,0.4,F,F,F,F,0,T,0.05,500))
+
+ #Treatment Prevalence = 0.1
+
+  #Crude Estimator
+set.seed(1234)
+(rmse.crude.g1.tp1 <- rmse(1,0.1,T,F,F,F,0,F,0,500))
+(rmse.crude.g2.tp1 <- rmse(2,0.1,T,F,F,F,0,F,0,500))
+(rmse.crude.g3.tp1 <- rmse(3,0.1,T,F,F,F,0,F,0,500))
+(rmse.crude.g4.tp1 <- rmse(4,0.1,T,F,F,F,0,F,0,500))
+
+  #Overlap Estimator
+set.seed(1234)
+(rmse.ov.g1.tp1 <- rmse(1,0.1,F,T,F,F,0,F,0,500))
+(rmse.ov.g2.tp1 <- rmse(2,0.1,F,T,F,F,0,F,0,500))
+(rmse.ov.g3.tp1 <- rmse(3,0.1,F,T,F,F,0,F,0,500))
+(rmse.ov.g4.tp1 <- rmse(4,0.1,F,T,F,F,0,F,0,500))
+
+  #IPW With no Trim
+set.seed(1234)
+(rmse.ipw.g1.tp1 <- rmse(1,0.1,F,F,T,F,0,F,0,500))
+(rmse.ipw.g2.tp1 <- rmse(2,0.1,F,F,T,F,0,F,0,500))
+(rmse.ipw.g3.tp1 <- rmse(3,0.1,F,F,T,F,0,F,0,500))
+(rmse.ipw.g4.tp1 <- rmse(4,0.1,F,F,T,F,0,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.05
+set.seed(1234)
+(rmse.symtrim.a5.g1.tp1 <- rmse(1,0.1,F,F,F,T,0.05,F,0,500))
+(rmse.symtrim.a5.g2.tp1 <- rmse(2,0.1,F,F,F,T,0.05,F,0,500))
+(rmse.symtrim.a5.g3.tp1 <- rmse(3,0.1,F,F,F,T,0.05,F,0,500))
+(rmse.symtrim.a5.g4.tp1 <- rmse(4,0.1,F,F,F,T,0.05,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.10
+set.seed(1234)
+(rmse.symtrim.a10.g1.tp1 <- rmse(1,0.1,F,F,F,T,0.10,F,0,500))
+(rmse.symtrim.a10.g2.tp1 <- rmse(2,0.1,F,F,F,T,0.10,F,0,500))
+(rmse.symtrim.a10.g3.tp1 <- rmse(3,0.1,F,F,F,T,0.10,F,0,500))
+(rmse.symtrim.a10.g4.tp1 <- rmse(4,0.1,F,F,F,T,0.10,F,0,500))
+
+#IPW With Symmetric Trim and alpha = 0.15
+set.seed(1234)
+(rmse.symtrim.a15.g1.tp1 <- rmse(1,0.1,F,F,F,T,0.15,F,0,500))
+(rmse.symtrim.a15.g2.tp1 <- rmse(2,0.1,F,F,F,T,0.15,F,0,500))
+(rmse.symtrim.a15.g3.tp1 <- rmse(3,0.1,F,F,F,T,0.15,F,0,500))
+(rmse.symtrim.a15.g4.tp1 <- rmse(4,0.1,F,F,F,T,0.15,F,0,500))
+
+#IPW With Asymmetric Trim and q = 0
+set.seed(1234)
+(rmse.asymtrim.q0.g1.tp1 <- rmse(1,0.1,F,F,F,F,0,T,0,500))
+(rmse.asymtrim.q0.g2.tp1 <- rmse(2,0.1,F,F,F,F,0,T,0,500))
+(rmse.asymtrim.q0.g3.tp1 <- rmse(3,0.1,F,F,F,F,0,T,0,500))
+(rmse.asymtrim.q0.g4.tp1 <- rmse(4,0.1,F,F,F,F,0,T,0,500))
+
+#IPW With Asymmetric Trim and q = 0.01
+set.seed(1234)
+(rmse.asymtrim.q1.g1.tp1 <- rmse(1,0.1,F,F,F,F,0,T,0.01,500))
+(rmse.asymtrim.q1.g2.tp1 <- rmse(2,0.1,F,F,F,F,0,T,0.01,500))
+(rmse.asymtrim.q1.g3.tp1 <- rmse(3,0.1,F,F,F,F,0,T,0.01,500))
+(rmse.asymtrim.q1.g4.tp1 <- rmse(4,0.1,F,F,F,F,0,T,0.01,500))
+
+#IPW With Asymmetric Trim and q = 0.05
+set.seed(1234)
+(rmse.asymtrim.q5.g1.tp1 <- rmse(1,0.1,F,F,F,F,0,T,0.05,500))
+(rmse.asymtrim.q5.g2.tp1 <- rmse(2,0.1,F,F,F,F,0,T,0.05,500))
+(rmse.asymtrim.q5.g3.tp1 <- rmse(3,0.1,F,F,F,F,0,T,0.05,500))
+(rmse.asymtrim.q5.g4.tp1 <- rmse(4,0.1,F,F,F,F,0,T,0.05,500))
+```
+
+##Calculating 95% Confidence Intervals of Estimators
+
+###NOTE: Set the seed before each individual simulation
+
+```{r}
+#Function to determine if CI contains 0.75 (95% CI coverage) 
+ci95 <- function(data,m){
+  yes <- 0
+  for(i in 1:m){
+    ul.ind <- data[1,i] + (1.96*data[2,i])
+    ll.ind <- data[1,i] - (1.96*data[2,i])
+    if(((ll.ind < 0.75 ) & (ul.ind > 0.75))){
+      yes <- yes + 1
+    } else yes <- yes
+  }
+  return(yes)
+}
+
+#Bootstrap function for crude estimator (Figures out estimator mean and std. error)
+sim.boot.crude <- function(data, gamma, treat.prev, n){
+  i <- sample(1:n, size=n, replace=TRUE)
+  x.boot <- data[i,]
+  ps <- ps.model(x.boot,gamma, treat.prev, n)
+  z <- treat.assign(ps,n)
+  y <- outcomeModel(x.boot,z,n)
+  x.boot <- data.frame(x.boot, ps, z, y)
+  crude <- (sum(x.boot[,8]*x.boot[,9])/sum(x.boot[,8])) - (sum((1-x.boot[,8])*x.boot[,9])/sum((1-x.boot[,8])))
+  return(crude)
+}
+
+#Performing the bootstrap on crude estimator 
+data.boot.crude <- function(gamma, treat.prev, n){
+  x <- gen(n)
+  crude.star <- replicate(100, expr = sim.boot.crude(x,gamma,treat.prev,n))
+  return(c(mean(crude.star), std.error(crude.star)))
+}
+
+#Replicate the bootstraps and find 95% CI coverage
+set.seed(1234)
+crude.star <- replicate(100, expr = data.boot.crude(1,0.4,500), simplify=TRUE)
+ci95(crude.star,100)
+crude.star <- replicate(100, expr = data.boot.crude(2,0.4,500), simplify=TRUE)
+ci95(crude.star,100)
+crude.star <- replicate(100, expr = data.boot.crude(3,0.4,500), simplify=TRUE)
+ci95(crude.star,100)
+crude.star <- replicate(100, expr = data.boot.crude(4,0.4,500), simplify=TRUE)
+ci95(crude.star,100)
+
+#Bootstrap function for overlap estimator (Finds mean and std. error of overlap estimator of each dataset)
+sim.boot.overlap <- function(data, gamma, treat.prev, n){
+  i <- sample(1:n, size=n, replace=TRUE)
+  x.boot <- data[i,]
+  ps <- ps.model(x.boot,gamma, treat.prev, n)
+  z <- treat.assign(ps,n)
+  y <- outcomeModel(x.boot,z,n)
+  x.boot <- data.frame(x.boot, ps, z, y)
+  omega_ol <- omega.ol(x.boot,n)
+  x.boot <- data.frame(x.boot,omega_ol)
+  (overlap <- (sum(x.boot[,8]*x.boot[,9]*x.boot[,10])/sum(x.boot[,8]*x.boot[,10])) - 
+  sum((1-x.boot[,8])*x.boot[,9]*x.boot[,10])/sum((1-x.boot[,8])*x.boot[,10]))
+  return(overlap)
+}
+
+#Performing the bootstrap on overlap estimator
+data.boot.overlap <- function(gamma, treat.prev, n){
+  x <- gen(n)
+  ov.star <- replicate(100, expr = sim.boot.overlap(x,gamma,treat.prev,n))
+  return(c(mean(ov.star), std.error(ov.star)))
+}
+
+#Replicate the bootstraps and find 95% coverage
+set.seed(1234)
+overlap.star <- replicate(100, expr = data.boot.overlap(1,0.4,500), simplify=TRUE)
+ci95(overlap.star,100)
+overlap.star <- replicate(100, expr = data.boot.overlap(2,0.4,500), simplify=TRUE)
+ci95(overlap.star,100)
+overlap.star <- replicate(100, expr = data.boot.overlap(3,0.4,500), simplify=TRUE)
+ci95(overlap.star,100)
+overlap.star <- replicate(100, expr = data.boot.overlap(4,0.4,500), simplify=TRUE)
+ci95(overlap.star,100)
+
+#Bootstrap function for ipw estimator (Finds mean and std. error of ipw estimator of each dataset)
+sim.boot.ipw <- function(data, gamma, treat.prev, n){
+  i <- sample(1:n, size=n, replace=TRUE)
+  x.boot <- data[i,]
+  ps <- ps.model(x.boot,gamma, treat.prev, n)
+  z <- treat.assign(ps,n)
+  y <- outcomeModel(x.boot,z,n)
+  x.boot <- data.frame(x.boot, ps, z, y)
+  omega_ipw <- omega.ipw(x.boot,n)
+  x.boot <- data.frame(x.boot,omega_ipw)
+  ipw <- (sum(x.boot[,8]*x.boot[,9]*x.boot[,10])/sum(x.boot[,8]*x.boot[,10])) - 
+  (sum((1-x.boot[,8])*x.boot[,9]*x.boot[,10])/sum((1-x.boot[,8])*x.boot[,10]))
+  return(ipw)
+}
+
+#Performing the bootstrap on ipw estimator
+data.boot.ipw <- function(gamma, treat.prev, n){
+  x <- gen(n)
+  ipw.star <- replicate(100, expr = sim.boot.ipw(x,gamma,treat.prev,n))
+  return(c(mean(ipw.star), std.error(ipw.star)))
+}
+
+#Replicate the bootstraps and find 95% coverage
+set.seed(1234)
+ipw.star <- replicate(100, expr = data.boot.ipw(1,0.4,500), simplify=TRUE)
+ci95(ipw.star,100)
+ipw.star <- replicate(100, expr = data.boot.ipw(2,0.4,500), simplify=TRUE)
+ci95(ipw.star,100)
+ipw.star <- replicate(100, expr = data.boot.ipw(3,0.4,500), simplify=TRUE)
+ci95(ipw.star,100)
+ipw.star <- replicate(100, expr = data.boot.ipw(4,0.4,500), simplify=TRUE)
+ci95(ipw.star,100)
+
+#Bootstrap function for symmetrically trimmed ipw estimator (Finds mean and std. error of sym trim ipw estimator of each dataset)
+sim.boot.ipw.strim <- function(data, gamma, treat.prev, alpha, n){
+  i <- sample(1:n, size=n, replace=TRUE)
+  x.boot <- data[i,]
+  ps <- ps.model(x.boot,gamma, treat.prev, n)
+  z <- treat.assign(ps,n)
+  y <- outcomeModel(x.boot,z,n)
+  x.boot <- data.frame(x.boot, ps, z, y)
+  x.boot.trunc <- sym.trim(x.boot,alpha,n)
+  n2 <- length(x.boot.trunc[,1])
+  omega_ipw_trim <- omega.ipw.trim(x.boot.trunc,n2)
+  x.boot.trunc <- data.frame(x.boot.trunc,omega_ipw_trim)
+  ipw.trim <- (sum(x.boot.trunc[,8]*x.boot.trunc[,9]*x.boot.trunc[,10])/sum(x.boot.trunc[,8]*x.boot.trunc[,10])) - 
+  (sum((1-x.boot.trunc[,8])*x.boot.trunc[,9]*x.boot.trunc[,10])/sum((1-x.boot.trunc[,8])*x.boot.trunc[,10]))
+  return(ipw.trim)
+}
+
+#Performing the bootstrap on sym trim ipw estimator
+data.boot.ipw.strim <- function(gamma, treat.prev, alpha, n){
+  x <- gen(n)
+  ipw.strim.star <- replicate(100, expr = sim.boot.ipw.strim(x,gamma,treat.prev,alpha,n))
+  return(c(mean(ipw.strim.star), std.error(ipw.strim.star)))
+}
+
+#Replicate the bootstraps and find 95% coverage
+set.seed(1234)
+ipw.strim.star <- replicate(100, expr = data.boot.ipw.strim(1,0.4,0.15,500), simplify=TRUE)
+ci95(ipw.strim.star,100)
+ipw.strim.star <- replicate(100, expr = data.boot.ipw.strim(2,0.4,0.15,500), simplify=TRUE)
+ci95(ipw.strim.star,100)
+ipw.strim.star <- replicate(100, expr = data.boot.ipw.strim(3,0.4,0.15,500), simplify=TRUE)
+ci95(ipw.strim.star,100)
+ipw.strim.star <- replicate(100, expr = data.boot.ipw.strim(4,0.4,0.15,500), simplify=TRUE)
+ci95(ipw.strim.star,100)
+```
+
+
